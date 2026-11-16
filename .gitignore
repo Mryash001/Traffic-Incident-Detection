@@ -1,0 +1,14 @@
+*.class
+*.log
+target/
+build/
+out/
+.idea/
+.vscode/
+.DS_Store
+.env
+*.iml
+__pycache__/
+*.pyc
+venv/
+.env
