@@ -3,16 +3,16 @@ import os
 import uuid
 from pathlib import Path
 
-import cv2
 import numpy as np
-import pandas as pd
 import torch
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from models.incident_model import TrafficIncidentModel
-from preprocessing.video_preprocessing import load_video
+
+from preprocessing.video_loader import load_video
+
 from preprocessing.sensor_preprocessing import (
     load_sensor_data,
     smooth_sensor_data,
@@ -40,18 +40,16 @@ FRONTEND_URL = os.getenv(
 
 app = FastAPI(
     title="Traffic Incident Detection API",
-    description="Multi-modal traffic incident detection using CCTV video and IoT sensor data",
+    description="Multi-modal traffic incident detection using CCTV video and IoT roadside sensors",
     version="1.0.0"
 )
 
-allowed_origins = [
-    "http://localhost:5173",
-    FRONTEND_URL
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=list({
+        "http://localhost:5173",
+        FRONTEND_URL
+    }),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -101,24 +99,32 @@ def run_inference(video_path):
     )
 
     if frames is None or len(frames) == 0:
-        raise ValueError("No frames could be extracted from the video")
+        raise ValueError("No video frames could be extracted")
 
     video_tensor = torch.tensor(
         np.asarray(frames),
         dtype=torch.float32
     ).to(DEVICE)
 
-    if video_tensor.ndim == 4:
-        video_tensor = video_tensor.unsqueeze(0)
-
     with torch.no_grad():
 
         visual_features = model.visual_model(video_tensor)
 
         if visual_features.ndim == 3:
-            visual_features = visual_features.mean(dim=1)
+            visual_features = visual_features.mean(
+                dim=1,
+                keepdim=False
+            ).unsqueeze(0)
 
-        sensor_df = load_sensor_data(str(SENSOR_PATH))
+        elif visual_features.ndim == 2:
+            visual_features = visual_features.mean(
+                dim=0,
+                keepdim=True
+            )
+
+        sensor_df = load_sensor_data(
+            str(SENSOR_PATH)
+        )
 
         sensor_df = smooth_sensor_data(sensor_df)
 
@@ -128,11 +134,13 @@ def run_inference(video_path):
         )
 
         sensor_tensor = torch.tensor(
-            np.asarray(sensor_window),
+            sensor_window,
             dtype=torch.float32
         ).unsqueeze(0).to(DEVICE)
 
-        sensor_features = model.sensor_model(sensor_tensor)
+        sensor_features = model.sensor_model(
+            sensor_tensor
+        )
 
         fused_features, attention_weights = model.fusion(
             visual_features,
@@ -143,17 +151,24 @@ def run_inference(video_path):
 
         probability = torch.sigmoid(output).item()
 
-        attention_values = attention_weights.detach().cpu().numpy()
-
     return {
         "video_fps": float(fps),
         "frames_processed": int(len(frames)),
         "visual_feature_dimensions": list(visual_features.shape),
         "sensor_feature_dimensions": list(sensor_features.shape),
         "fused_feature_dimensions": list(fused_features.shape),
-        "cctv_attention": round(float(attention_values[0][0]), 4),
-        "iot_attention": round(float(attention_values[0][1]), 4),
-        "incident_probability": round(float(probability), 4)
+        "cctv_attention": round(
+            float(attention_weights[0, 0, 0].item()),
+            4
+        ),
+        "iot_attention": round(
+            float(attention_weights[0, 1, 0].item()),
+            4
+        ),
+        "incident_probability": round(
+            float(probability),
+            4
+        )
     }
 
 
@@ -195,7 +210,6 @@ async def analyze_video(file: UploadFile = File(...)):
         )
 
     video_id = str(uuid.uuid4())
-
     video_path = UPLOAD_DIR / f"{video_id}{extension}"
 
     try:
